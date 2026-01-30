@@ -1,0 +1,97 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "geofast"
+version = "0.2.1"
+description = "High-performance geospatial processing with GPU acceleration, Numba JIT, and format conversion"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+    {name = "Norm", email = "norm@headingshelicopters.com"}
+]
+keywords = [
+    "geospatial",
+    "gis",
+    "gpu",
+    "cuda",
+    "numba",
+    "parallel",
+    "shapely",
+    "geopandas",
+    "kml",
+    "geojson",
+    "gpx",
+    "mpz",
+    "format-conversion",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: GIS",
+    "Topic :: Scientific/Engineering :: Information Analysis",
+]
+
+dependencies = [
+    "numpy>=1.21",
+]
+
+[project.optional-dependencies]
+geo = [
+    "geopandas>=0.12",
+    "shapely>=2.0",
+    "fiona>=1.8",
+    "pyproj>=3.0",
+]
+gpu = [
+    "cupy-cuda12x",  # For CUDA 12.x - adjust for your version
+]
+numba = [
+    "numba>=0.56",
+]
+full = [
+    "numba>=0.56",
+    "shapely>=2.0",
+]
+all = [
+    "geofast[geo,numba]",
+]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov",
+    "black",
+    "ruff",
+]
+
+[project.scripts]
+geofast = "geofast.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["geofast*"]
+
+[tool.setuptools.package-data]
+geofast = ["py.typed"]
+
+[tool.black]
+line-length = 100
+target-version = ["py39", "py310", "py311", "py312"]
+
+[tool.ruff]
+line-length = 100
+select = ["E", "F", "I", "N", "W"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --cov=geofast"
