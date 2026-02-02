@@ -10,7 +10,9 @@ Supports both aerial (with hops) and ground operations (no hops).
 
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional, Tuple, Union
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import math
+import os
 
 import numpy as np
 
@@ -42,6 +44,7 @@ class SprayConfig:
         angle_step_deg: Angle increment for optimization search (default 5)
         angle_change_penalty_min: Time penalty for changing spray angle between fields (default 2 min)
         group_distance_ft: Max distance between fields to consider grouping (default 1300ft)
+        max_workers: Max parallel workers for multiprocessing (default: CPU count)
     """
     swath_width_ft: float = 50.0
     spray_speed_mph: float = 68.0
@@ -53,6 +56,7 @@ class SprayConfig:
     angle_step_deg: float = 5.0
     angle_change_penalty_min: float = 2.0
     group_distance_ft: float = 1300.0
+    max_workers: int = None  # None = use CPU count
 
 
 # ============================================================================
@@ -911,6 +915,22 @@ def optimize_field_group(
         )
 
 
+def _optimize_single_polygon_worker(args):
+    """Worker function for parallel polygon optimization."""
+    poly_wkt, config_dict = args
+    from shapely import wkt
+
+    poly = wkt.loads(poly_wkt)
+    config = SprayConfig(**config_dict)
+
+    angle, metrics, _ = optimize_angle(poly, config)
+    if not metrics or 'total_time_min' not in metrics:
+        metrics = {'total_time_min': 0, 'acres_per_hour': 0, 'acres': 0,
+                   'num_tracks': 0, 'num_turns': 0, 'num_hops': 0}
+
+    return angle, metrics
+
+
 def optimize_multi_field(
     polygons: List[Union['Polygon', dict, list]],
     config: Optional[SprayConfig] = None,
@@ -922,6 +942,8 @@ def optimize_multi_field(
     Fields within group_distance_ft of each other are considered together.
     For each group, determines whether to use individual optimal angles
     (with angle change penalties) or a common angle for the whole group.
+
+    Uses multiprocessing for parallel optimization across CPU cores.
 
     Args:
         polygons: List of field boundaries
@@ -944,23 +966,125 @@ def optimize_multi_field(
     # Group nearby polygons
     groups = group_nearby_polygons(polys, config.group_distance_ft)
 
-    # Optimize each group
+    # Determine number of workers
+    max_workers = config.max_workers or os.cpu_count() or 4
+
+    # For parallel processing, we'll optimize individual polygons in parallel
+    # then apply grouping logic after
+
+    # First, get all polygons that need individual optimization (groups > 20 or need to compare)
     results = [None] * len(polys)
 
+    # Convert config to dict for pickling
+    config_dict = {
+        'swath_width_ft': config.swath_width_ft,
+        'spray_speed_mph': config.spray_speed_mph,
+        'ferry_speed_mph': config.ferry_speed_mph,
+        'turn_time_sec': config.turn_time_sec,
+        'hop_distance_ft': config.hop_distance_ft,
+        'hop_enabled': config.hop_enabled,
+        'headland_ft': config.headland_ft,
+        'angle_step_deg': config.angle_step_deg,
+    }
+
+    # Prepare work items: (poly_wkt, config_dict, original_index)
+    work_items = []
+    for i, poly in enumerate(polys):
+        work_items.append((poly.wkt, config_dict))
+
+    # Run parallel optimization
+    poly_results = [None] * len(polys)
+
+    if len(polys) > 10 and max_workers > 1:
+        # Use multiprocessing for large datasets
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(_optimize_single_polygon_worker, item): i
+                       for i, item in enumerate(work_items)}
+
+            for future in as_completed(futures):
+                idx = futures[future]
+                try:
+                    angle, metrics = future.result()
+                    poly_results[idx] = (angle, metrics)
+                except Exception as e:
+                    # Fallback for failed polygons
+                    poly_results[idx] = (0.0, {'total_time_min': 0, 'acres_per_hour': 0})
+    else:
+        # Sequential for small datasets
+        for i, item in enumerate(work_items):
+            angle, metrics = _optimize_single_polygon_worker(item)
+            poly_results[i] = (angle, metrics)
+
+    # Now apply grouping logic to determine common vs individual angles
     for group_id, group_indices in enumerate(groups):
-        group_polys = [polys[i] for i in group_indices]
+        n = len(group_indices)
 
-        angles, metrics_list, strategy = optimize_field_group(
-            group_polys, config, obstacles
-        )
+        # Get individual results for this group
+        group_angles = [poly_results[i][0] for i in group_indices]
+        group_metrics = [poly_results[i][1] for i in group_indices]
 
+        if n <= 20:
+            # For small groups, check if common angle is better
+            individual_total_time = sum(m['total_time_min'] for m in group_metrics)
+
+            # Count angle changes
+            angle_changes = sum(1 for i in range(1, n)
+                               if abs(group_angles[i] - group_angles[i-1]) > config.angle_step_deg)
+            individual_total_time += angle_changes * config.angle_change_penalty_min
+
+            # Find best common angle (check the most common individual angles)
+            from collections import Counter
+            angle_counts = Counter(int(a / 15) * 15 for a in group_angles)  # Bucket by 15°
+            common_candidates = [a for a, _ in angle_counts.most_common(3)]
+            common_candidates.extend([0, 90])  # Always try 0 and 90
+
+            best_common_time = float('inf')
+            best_common_angle = 0
+            best_common_metrics = group_metrics
+
+            for test_angle in set(common_candidates):
+                total_time = 0
+                test_metrics = []
+                for i in group_indices:
+                    # Generate at common angle
+                    tracks = generate_parallel_lines(polys[i], test_angle,
+                                                     config.swath_width_ft, config.headland_ft)
+                    if tracks:
+                        m = calculate_efficiency_from_tracks(tracks, polys[i], config)
+                        total_time += m['total_time_min']
+                        test_metrics.append(m)
+                    else:
+                        total_time += 999
+                        test_metrics.append({'total_time_min': 999, 'acres_per_hour': 0})
+
+                if total_time < best_common_time:
+                    best_common_time = total_time
+                    best_common_angle = test_angle
+                    best_common_metrics = test_metrics
+
+            # Choose better strategy
+            if best_common_time <= individual_total_time:
+                strategy = 'common'
+                final_angles = [best_common_angle] * n
+                final_metrics = best_common_metrics
+            else:
+                strategy = 'individual'
+                final_angles = group_angles
+                final_metrics = group_metrics
+        else:
+            # Large groups: use individual angles
+            strategy = 'individual'
+            final_angles = group_angles
+            final_metrics = group_metrics
+
+        # Store results
         for idx, poly_idx in enumerate(group_indices):
             results[poly_idx] = {
-                'angle': angles[idx],
-                'metrics': metrics_list[idx],
+                'angle': final_angles[idx],
+                'metrics': final_metrics[idx],
                 'group_id': group_id,
                 'strategy': strategy,
-                'group_size': len(group_indices)
+                'group_size': n
             }
 
     return results
