@@ -1212,8 +1212,7 @@ def optimize_multi_field(
             angle, metrics = _optimize_single_polygon_worker(item)
             poly_results[i] = (angle, metrics)
 
-    # Now apply grouping logic to determine best common angle for each job group
-    # Use multi-polygon efficiency calculation that accounts for hops between fields
+    # Now apply grouping logic - compare common angle (with hopping) vs individual angles
     for group_id, group_indices in enumerate(groups):
         n = len(group_indices)
         group_polys = [polys[i] for i in group_indices]
@@ -1230,19 +1229,41 @@ def optimize_multi_field(
             }
             continue
 
-        # For groups with multiple fields, find best common angle
-        # using multi-polygon calculation that accounts for hops between fields
-        from collections import Counter
+        # Get individual optimal angles and their metrics
         group_angles = [poly_results[i][0] for i in group_indices]
-        angle_counts = Counter(int(a / 15) * 15 for a in group_angles)
-        common_candidates = [a for a, _ in angle_counts.most_common(3)]
-        common_candidates.extend([0, 45, 90, 135])
+        group_metrics = [poly_results[i][1] for i in group_indices]
+        individual_total_time = sum(m['total_time_min'] for m in group_metrics)
 
+        # Build candidate angles: include actual field orientations for better fit
+        candidate_angles = set([0, 45, 90, 135])
+        for poly in group_polys:
+            # Get field's long axis orientation
+            try:
+                min_rect = poly.minimum_rotated_rectangle
+                coords = list(min_rect.exterior.coords)
+                e1 = ((coords[1][0]-coords[0][0])**2 + (coords[1][1]-coords[0][1])**2)**0.5
+                e2 = ((coords[2][0]-coords[1][0])**2 + (coords[2][1]-coords[1][1])**2)**0.5
+                if e1 > e2:
+                    angle = math.degrees(math.atan2(coords[1][1]-coords[0][1],
+                                                    coords[1][0]-coords[0][0])) % 180
+                else:
+                    angle = math.degrees(math.atan2(coords[2][1]-coords[1][1],
+                                                    coords[2][0]-coords[1][0])) % 180
+                # Add this angle and nearby angles (±5°)
+                candidate_angles.add(round(angle))
+                candidate_angles.add(round(angle - 5) % 180)
+                candidate_angles.add(round(angle + 5) % 180)
+            except:
+                pass
+        # Also add the individual optimal angles
+        for a in group_angles:
+            candidate_angles.add(round(a))
+
+        # Find best common angle using multi-polygon calculation (with hopping)
         best_common_time = float('inf')
         best_common_angle = 0
 
-        for test_angle in set(common_candidates):
-            # Generate lines across ALL polygons together
+        for test_angle in candidate_angles:
             tracks = generate_parallel_lines_multi(
                 group_polys, test_angle, config.swath_width_ft, config.headland_ft
             )
@@ -1252,25 +1273,34 @@ def optimize_multi_field(
                     best_common_time = metrics['total_time_min']
                     best_common_angle = test_angle
 
-        # Generate final metrics for each polygon at the best common angle
-        final_metrics = []
-        for poly in group_polys:
-            tracks = generate_parallel_lines(poly, best_common_angle,
-                                             config.swath_width_ft, config.headland_ft)
-            if tracks:
-                m = calculate_efficiency_from_tracks(tracks, poly, config)
-                final_metrics.append(m)
-            else:
-                final_metrics.append({'total_time_min': 0, 'acres_per_hour': 0, 'acres': 0,
-                                      'num_tracks': 0, 'num_turns': 0, 'num_hops': 0})
+        # Compare: common (with hopping) vs individual (no hopping between fields)
+        if best_common_time <= individual_total_time:
+            # Common angle with hopping is better
+            strategy = 'common'
+            final_angles = [best_common_angle] * n
+            final_metrics = []
+            for poly in group_polys:
+                tracks = generate_parallel_lines(poly, best_common_angle,
+                                                 config.swath_width_ft, config.headland_ft)
+                if tracks:
+                    m = calculate_efficiency_from_tracks(tracks, poly, config)
+                    final_metrics.append(m)
+                else:
+                    final_metrics.append({'total_time_min': 0, 'acres_per_hour': 0, 'acres': 0,
+                                          'num_tracks': 0, 'num_turns': 0, 'num_hops': 0})
+        else:
+            # Individual angles are better (fields too different to share lines)
+            strategy = 'individual'
+            final_angles = group_angles
+            final_metrics = group_metrics
 
-        # Store results - all fields in group use the same angle
+        # Store results
         for idx, poly_idx in enumerate(group_indices):
             results[poly_idx] = {
-                'angle': best_common_angle,
+                'angle': final_angles[idx],
                 'metrics': final_metrics[idx],
                 'group_id': group_id,
-                'strategy': 'common',
+                'strategy': strategy,
                 'group_size': n
             }
 
