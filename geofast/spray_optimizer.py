@@ -639,8 +639,9 @@ def optimize_angle(
     obs_list = _ensure_obstacles(obstacles)
 
     # Two-phase search for speed: coarse (every 15°) then refine around best
-    # Phase 1: Coarse search - 7 angles
-    coarse_angles = [0.0, 15.0, 30.0, 45.0, 60.0, 75.0, 90.0]
+    # Phase 1: Coarse search - 13 angles covering full 0-180° range
+    # (0° and 180° are same orientation, so we check 0-175°)
+    coarse_angles = [0.0, 15.0, 30.0, 45.0, 60.0, 75.0, 90.0, 105.0, 120.0, 135.0, 150.0, 165.0]
     coarse_results = {}
 
     for angle in coarse_angles:
@@ -661,8 +662,8 @@ def optimize_angle(
     angles_to_try = set()
     for base_angle in [best_coarse_angle, second_coarse_angle]:
         for delta in [-10, -5, 5, 10]:
-            refined = base_angle + delta
-            if 0 <= refined <= 90 and refined not in coarse_angles:
+            refined = (base_angle + delta) % 180  # Wrap around 0-180 range
+            if refined not in coarse_angles:
                 angles_to_try.add(refined)
 
     # Initialize best from coarse results
@@ -876,7 +877,7 @@ def optimize_field_group(
 
     common_angle_step = 15.0  # Coarser step for common angle search
     angle = 0.0
-    while angle <= 90.0:
+    while angle < 180.0:
         total_time = 0.0
         metrics_at_angle = []
 
@@ -1036,7 +1037,7 @@ def optimize_multi_field(
             from collections import Counter
             angle_counts = Counter(int(a / 15) * 15 for a in group_angles)  # Bucket by 15°
             common_candidates = [a for a, _ in angle_counts.most_common(3)]
-            common_candidates.extend([0, 90])  # Always try 0 and 90
+            common_candidates.extend([0, 45, 90, 135])  # Always try cardinal and diagonal angles
 
             best_common_time = float('inf')
             best_common_angle = 0
