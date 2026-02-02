@@ -291,6 +291,189 @@ def flatten_tracks(tracks: List[List['LineString']]) -> List['LineString']:
     return lines
 
 
+def generate_parallel_lines_multi(
+    polygons: List['Polygon'],
+    angle_deg: float,
+    swath_width_ft: float,
+    headland_ft: float = 0.0
+) -> List[List['LineString']]:
+    """
+    Generate parallel lines across MULTIPLE polygons at a given angle.
+
+    Unlike generate_parallel_lines which treats each polygon independently,
+    this function generates lines that span across all polygons. Line segments
+    at the same Y-coordinate (after rotation) are grouped into the same track,
+    allowing for hops between adjacent polygons.
+
+    Args:
+        polygons: List of field boundary polygons
+        angle_deg: Angle of lines in degrees
+        swath_width_ft: Spacing between lines in feet
+        headland_ft: Buffer from field edge in feet
+
+    Returns:
+        List of tracks where segments from different polygons on the same
+        pass are grouped together (enabling hops between them).
+    """
+    if not polygons:
+        return []
+
+    # Get overall centroid for coordinate conversions
+    from shapely.ops import unary_union
+    all_union = unary_union(polygons)
+    centroid = all_union.centroid
+    centroid_lat = centroid.y
+
+    # Convert swath width to degrees
+    swath_deg = ft_to_deg_at_angle(swath_width_ft, angle_deg, centroid_lat)
+
+    # Get bounding box of ALL polygons (rotated)
+    all_minx, all_miny, all_maxx, all_maxy = float('inf'), float('inf'), float('-inf'), float('-inf')
+
+    rotated_polys = []
+    for poly in polygons:
+        if not poly.is_valid:
+            poly = poly.buffer(0)
+        if headland_ft > 0:
+            buffer_deg = ft_to_deg_lat(headland_ft)
+            poly = poly.buffer(-buffer_deg)
+            if poly.is_empty:
+                continue
+
+        rotated = affinity.rotate(poly, -angle_deg, origin=centroid)
+        rotated_polys.append((poly, rotated))
+
+        minx, miny, maxx, maxy = rotated.bounds
+        all_minx = min(all_minx, minx)
+        all_miny = min(all_miny, miny)
+        all_maxx = max(all_maxx, maxx)
+        all_maxy = max(all_maxy, maxy)
+
+    if not rotated_polys:
+        return []
+
+    # Generate horizontal lines across all polygons
+    # Group segments by Y coordinate (track)
+    track_dict = {}  # y_coord -> list of segments
+
+    y = all_miny + swath_deg / 2
+    track_idx = 0
+
+    while y < all_maxy:
+        line = LineString([(all_minx - swath_deg, y), (all_maxx + swath_deg, y)])
+        track_segments = []
+
+        for orig_poly, rotated_poly in rotated_polys:
+            clipped = line.intersection(rotated_poly)
+
+            if not clipped.is_empty:
+                if isinstance(clipped, MultiLineString):
+                    for segment in clipped.geoms:
+                        if segment.length > 0:
+                            rotated_back = affinity.rotate(segment, angle_deg, origin=centroid)
+                            track_segments.append(rotated_back)
+                elif isinstance(clipped, LineString) and clipped.length > 0:
+                    rotated_back = affinity.rotate(clipped, angle_deg, origin=centroid)
+                    track_segments.append(rotated_back)
+
+        if track_segments:
+            # Sort segments by X coordinate (left to right)
+            track_segments.sort(key=lambda seg: min(seg.coords[0][0], seg.coords[-1][0]))
+            track_dict[track_idx] = track_segments
+            track_idx += 1
+
+        y += swath_deg
+
+    # Convert to list of tracks
+    tracks = [track_dict[i] for i in sorted(track_dict.keys())]
+    return tracks
+
+
+def calculate_efficiency_multi(
+    tracks: List[List['LineString']],
+    polygons: List['Polygon'],
+    config: SprayConfig,
+) -> Dict[str, float]:
+    """
+    Calculate efficiency metrics for spray pattern across multiple polygons.
+
+    This accounts for hops between adjacent polygons on the same track.
+    """
+    from shapely.ops import unary_union
+
+    all_union = unary_union(polygons)
+    centroid_lat = all_union.centroid.y
+
+    # Calculate total area
+    acres = sum(calculate_polygon_area_acres(p, centroid_lat) for p in polygons)
+
+    # Calculate distances and counts
+    spray_distance_ft = 0.0
+    hop_distance_ft = 0.0
+    ferry_distance_ft = 0.0
+    num_segments = 0
+    num_hops = 0
+
+    for track_idx, track in enumerate(tracks):
+        for i, segment in enumerate(track):
+            spray_distance_ft += calculate_line_length_ft(segment, centroid_lat)
+            num_segments += 1
+
+            # Gaps between segments on same track = hops
+            if i < len(track) - 1:
+                next_segment = track[i + 1]
+                end_coord = segment.coords[-1]
+                start_coord = next_segment.coords[0]
+
+                gap_ft = _distance_ft(end_coord, start_coord, centroid_lat)
+
+                if config.hop_enabled and gap_ft <= config.hop_distance_ft:
+                    hop_distance_ft += gap_ft
+                    num_hops += 1
+
+        # Transition to next track = turn
+        if track_idx < len(tracks) - 1:
+            next_track = tracks[track_idx + 1]
+            _, current_end = _get_track_endpoints(track)
+            next_start, next_end = _get_track_endpoints(next_track)
+
+            dist_to_start = _distance_ft(current_end, next_start, centroid_lat)
+            dist_to_end = _distance_ft(current_end, next_end, centroid_lat)
+            ferry_distance_ft += min(dist_to_start, dist_to_end)
+
+    num_turns = max(0, len(tracks) - 1)
+
+    # Calculate time
+    spray_speed_ft_min = config.spray_speed_mph * 5280 / 60
+    spray_time_min = spray_distance_ft / spray_speed_ft_min if spray_speed_ft_min > 0 else 0
+
+    ferry_speed_ft_min = config.ferry_speed_mph * 5280 / 60
+    hop_time_min = hop_distance_ft / ferry_speed_ft_min if ferry_speed_ft_min > 0 else 0
+    ferry_time_min = ferry_distance_ft / ferry_speed_ft_min if ferry_speed_ft_min > 0 else 0
+
+    turn_time_min = num_turns * config.turn_time_sec / 60
+    total_time_min = spray_time_min + hop_time_min + ferry_time_min + turn_time_min
+
+    acres_per_hour = acres / (total_time_min / 60) if total_time_min > 0 else 0
+
+    return {
+        'acres': acres,
+        'spray_distance_ft': spray_distance_ft,
+        'hop_distance_ft': hop_distance_ft,
+        'ferry_distance_ft': ferry_distance_ft,
+        'num_tracks': len(tracks),
+        'num_segments': num_segments,
+        'num_turns': num_turns,
+        'num_hops': num_hops,
+        'spray_time_min': spray_time_min,
+        'hop_time_min': hop_time_min,
+        'ferry_time_min': ferry_time_min,
+        'turn_time_min': turn_time_min,
+        'total_time_min': total_time_min,
+        'acres_per_hour': acres_per_hour,
+    }
+
+
 # ============================================================================
 # Obstacle Handling
 # ============================================================================
@@ -1029,75 +1212,65 @@ def optimize_multi_field(
             angle, metrics = _optimize_single_polygon_worker(item)
             poly_results[i] = (angle, metrics)
 
-    # Now apply grouping logic to determine common vs individual angles
+    # Now apply grouping logic to determine best common angle for each job group
+    # Use multi-polygon efficiency calculation that accounts for hops between fields
     for group_id, group_indices in enumerate(groups):
         n = len(group_indices)
+        group_polys = [polys[i] for i in group_indices]
 
-        # Get individual results for this group
+        if n == 1:
+            # Single polygon - use individual result
+            angle, metrics = poly_results[group_indices[0]]
+            results[group_indices[0]] = {
+                'angle': angle,
+                'metrics': metrics,
+                'group_id': group_id,
+                'strategy': 'individual',
+                'group_size': 1
+            }
+            continue
+
+        # For groups with multiple fields, find best common angle
+        # using multi-polygon calculation that accounts for hops between fields
+        from collections import Counter
         group_angles = [poly_results[i][0] for i in group_indices]
-        group_metrics = [poly_results[i][1] for i in group_indices]
+        angle_counts = Counter(int(a / 15) * 15 for a in group_angles)
+        common_candidates = [a for a, _ in angle_counts.most_common(3)]
+        common_candidates.extend([0, 45, 90, 135])
 
-        if n <= 20:
-            # For small groups, check if common angle is better
-            individual_total_time = sum(m['total_time_min'] for m in group_metrics)
+        best_common_time = float('inf')
+        best_common_angle = 0
 
-            # Count angle changes
-            angle_changes = sum(1 for i in range(1, n)
-                               if abs(group_angles[i] - group_angles[i-1]) > config.angle_step_deg)
-            individual_total_time += angle_changes * config.angle_change_penalty_min
-
-            # Find best common angle (check the most common individual angles)
-            from collections import Counter
-            angle_counts = Counter(int(a / 15) * 15 for a in group_angles)  # Bucket by 15°
-            common_candidates = [a for a, _ in angle_counts.most_common(3)]
-            common_candidates.extend([0, 45, 90, 135])  # Always try cardinal and diagonal angles
-
-            best_common_time = float('inf')
-            best_common_angle = 0
-            best_common_metrics = group_metrics
-
-            for test_angle in set(common_candidates):
-                total_time = 0
-                test_metrics = []
-                for i in group_indices:
-                    # Generate at common angle
-                    tracks = generate_parallel_lines(polys[i], test_angle,
-                                                     config.swath_width_ft, config.headland_ft)
-                    if tracks:
-                        m = calculate_efficiency_from_tracks(tracks, polys[i], config)
-                        total_time += m['total_time_min']
-                        test_metrics.append(m)
-                    else:
-                        total_time += 999
-                        test_metrics.append({'total_time_min': 999, 'acres_per_hour': 0})
-
-                if total_time < best_common_time:
-                    best_common_time = total_time
+        for test_angle in set(common_candidates):
+            # Generate lines across ALL polygons together
+            tracks = generate_parallel_lines_multi(
+                group_polys, test_angle, config.swath_width_ft, config.headland_ft
+            )
+            if tracks:
+                metrics = calculate_efficiency_multi(tracks, group_polys, config)
+                if metrics['total_time_min'] < best_common_time:
+                    best_common_time = metrics['total_time_min']
                     best_common_angle = test_angle
-                    best_common_metrics = test_metrics
 
-            # Choose better strategy
-            if best_common_time <= individual_total_time:
-                strategy = 'common'
-                final_angles = [best_common_angle] * n
-                final_metrics = best_common_metrics
+        # Generate final metrics for each polygon at the best common angle
+        final_metrics = []
+        for poly in group_polys:
+            tracks = generate_parallel_lines(poly, best_common_angle,
+                                             config.swath_width_ft, config.headland_ft)
+            if tracks:
+                m = calculate_efficiency_from_tracks(tracks, poly, config)
+                final_metrics.append(m)
             else:
-                strategy = 'individual'
-                final_angles = group_angles
-                final_metrics = group_metrics
-        else:
-            # Large groups: use individual angles
-            strategy = 'individual'
-            final_angles = group_angles
-            final_metrics = group_metrics
+                final_metrics.append({'total_time_min': 0, 'acres_per_hour': 0, 'acres': 0,
+                                      'num_tracks': 0, 'num_turns': 0, 'num_hops': 0})
 
-        # Store results
+        # Store results - all fields in group use the same angle
         for idx, poly_idx in enumerate(group_indices):
             results[poly_idx] = {
-                'angle': final_angles[idx],
+                'angle': best_common_angle,
                 'metrics': final_metrics[idx],
                 'group_id': group_id,
-                'strategy': strategy,
+                'strategy': 'common',
                 'group_size': n
             }
 
