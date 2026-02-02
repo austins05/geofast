@@ -443,6 +443,9 @@ def calculate_efficiency_multi(
 
     num_turns = max(0, len(tracks) - 1)
 
+    # Calculate average line length
+    avg_line_length_ft = spray_distance_ft / num_segments if num_segments > 0 else 0
+
     # Calculate time
     spray_speed_ft_min = config.spray_speed_mph * 5280 / 60
     spray_time_min = spray_distance_ft / spray_speed_ft_min if spray_speed_ft_min > 0 else 0
@@ -451,7 +454,17 @@ def calculate_efficiency_multi(
     hop_time_min = hop_distance_ft / ferry_speed_ft_min if ferry_speed_ft_min > 0 else 0
     ferry_time_min = ferry_distance_ft / ferry_speed_ft_min if ferry_speed_ft_min > 0 else 0
 
-    turn_time_min = num_turns * config.turn_time_sec / 60
+    # Turn time penalty - scale based on line length
+    # Short lines (lots of turns for little spraying) are penalized more
+    # Base: 9 sec per turn. If avg line < 2000 ft, scale up penalty
+    MIN_EFFICIENT_LINE_FT = 2000.0
+    if avg_line_length_ft > 0 and avg_line_length_ft < MIN_EFFICIENT_LINE_FT:
+        # Penalty multiplier: 1.0 at 2000ft, up to 2.0 at 500ft
+        penalty_multiplier = 1.0 + (MIN_EFFICIENT_LINE_FT - avg_line_length_ft) / MIN_EFFICIENT_LINE_FT
+        turn_time_min = num_turns * config.turn_time_sec * penalty_multiplier / 60
+    else:
+        turn_time_min = num_turns * config.turn_time_sec / 60
+
     total_time_min = spray_time_min + hop_time_min + ferry_time_min + turn_time_min
 
     acres_per_hour = acres / (total_time_min / 60) if total_time_min > 0 else 0
@@ -465,6 +478,7 @@ def calculate_efficiency_multi(
         'num_segments': num_segments,
         'num_turns': num_turns,
         'num_hops': num_hops,
+        'avg_line_length_ft': avg_line_length_ft,
         'spray_time_min': spray_time_min,
         'hop_time_min': hop_time_min,
         'ferry_time_min': ferry_time_min,
@@ -1233,6 +1247,29 @@ def optimize_multi_field(
         group_angles = [poly_results[i][0] for i in group_indices]
         group_metrics = [poly_results[i][1] for i in group_indices]
         individual_total_time = sum(m['total_time_min'] for m in group_metrics)
+
+        # Add angle change penalty only for fields within hop distance of each other
+        # Find which fields are "connected" (within hop distance)
+        # Then count distinct angles among connected fields - penalties = distinct_angles - 1
+        connected_field_indices = set()
+        for i in range(n):
+            for j in range(i + 1, n):
+                dist = _polygon_distance_ft(group_polys[i], group_polys[j])
+                if dist <= config.hop_distance_ft:
+                    connected_field_indices.add(i)
+                    connected_field_indices.add(j)
+
+        if connected_field_indices:
+            # Get distinct angles among connected fields (bucket by angle_step_deg)
+            connected_angles = set()
+            for i in connected_field_indices:
+                # Round to nearest angle_step_deg to group similar angles
+                rounded = round(group_angles[i] / config.angle_step_deg) * config.angle_step_deg
+                connected_angles.add(rounded % 180)
+
+            # Penalties = number of distinct angles - 1 (one change per new angle)
+            angle_change_penalties = max(0, len(connected_angles) - 1)
+            individual_total_time += angle_change_penalties * config.angle_change_penalty_min
 
         # Build candidate angles: include actual field orientations for better fit
         candidate_angles = set([0, 45, 90, 135])
