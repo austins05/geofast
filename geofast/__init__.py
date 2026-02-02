@@ -62,7 +62,18 @@ from .formats import (
     read_kml, write_kml,
     read_gpx, write_gpx,
     read_csv_points, write_csv_points,
-    read_mpz, MPZReader
+    read_mpz, MPZReader,
+    generate_spray_patterns
+)
+
+# Spray pattern optimization
+from .spray_optimizer import (
+    SprayConfig,
+    optimize_spray_pattern,
+    generate_parallel_lines,
+    calculate_efficiency,
+    optimize_angle,
+    generate_spray_pattern_geojson
 )
 
 # Caching
@@ -75,7 +86,7 @@ from .cache import (
     LRUCache, DiskCache, PolygonCellCache, SpatialIndexCache
 )
 
-__version__ = "0.1.0"
+__version__ = "0.3.0"
 __all__ = [
     # Core
     "process",
@@ -135,6 +146,14 @@ __all__ = [
     "read_gpx", "write_gpx",
     "read_csv_points", "write_csv_points",
     "read_mpz", "MPZReader",
+    "generate_spray_patterns",
+    # Spray pattern optimization
+    "SprayConfig",
+    "optimize_spray_pattern",
+    "generate_parallel_lines",
+    "calculate_efficiency",
+    "optimize_angle",
+    "generate_spray_pattern_geojson",
     # Caching
     "get_cache_config", "set_cache_config", "cached",
     "get_memory_cache", "get_disk_cache",

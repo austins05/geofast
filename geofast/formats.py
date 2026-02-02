@@ -956,3 +956,224 @@ def convert_batch(input_files: List[str], output_dir: str,
         return convert(input_path, output_path, **kwargs)
 
     return parallel_io(convert_one, input_files)
+
+
+# =============================================================================
+# Spray Pattern Generation (Streaming API)
+# =============================================================================
+
+def generate_spray_patterns(
+    input_path: str,
+    output_path: str,
+    config: Union[Dict[str, Any], 'SprayConfig', None] = None,
+    obstacles_path: Optional[str] = None,
+    return_metadata: bool = False,
+    angle: Optional[float] = None,
+    **kwargs
+) -> str:
+    """
+    Read geometries from any format, generate spray patterns, write to any format.
+
+    This is the main streaming API for spray pattern generation. It reads
+    polygon boundaries from the input file, generates optimal spray lines,
+    and writes them to the output file - all in one call.
+
+    Supports batch processing: if the input contains multiple polygons,
+    spray patterns are generated for each.
+
+    Args:
+        input_path: Input file (KML, GeoJSON, GPX, CSV, MPZ)
+        output_path: Output file (GeoJSON, KML, GPX)
+        config: SprayConfig object or dict with spray parameters:
+            - swath_width_ft: Width of spray pass (default 50)
+            - spray_speed_mph: Speed while spraying (default 68)
+            - ferry_speed_mph: Speed when not spraying (default 55)
+            - turn_time_sec: Turn time penalty (default 9)
+            - hop_distance_ft: Max hop distance (default 1300)
+            - hop_enabled: Enable hopping (default True, False for ground ops)
+            - headland_ft: Buffer from field edge (default 0)
+        obstacles_path: Optional file with obstacle polygons (no-spray zones)
+        return_metadata: Include efficiency stats in output properties
+        angle: Force specific angle (None for auto-optimization)
+        **kwargs: Additional format-specific options
+
+    Returns:
+        Output file path
+
+    Example:
+        >>> # Basic usage
+        >>> generate_spray_patterns('field.kml', 'lines.geojson')
+        >>>
+        >>> # With custom config
+        >>> generate_spray_patterns('field.kml', 'lines.geojson',
+        ...     config={'swath_width_ft': 60, 'hop_enabled': False})
+        >>>
+        >>> # With obstacles
+        >>> generate_spray_patterns('field.kml', 'lines.geojson',
+        ...     obstacles_path='waterways.geojson')
+        >>>
+        >>> # Include efficiency metadata
+        >>> generate_spray_patterns('fields.kml', 'lines.geojson',
+        ...     return_metadata=True)
+    """
+    # Import spray optimizer (late import to avoid circular dependency)
+    from .spray_optimizer import (
+        SprayConfig, optimize_spray_pattern, generate_spray_pattern_geojson
+    )
+
+    # Build config
+    if config is None:
+        spray_config = SprayConfig()
+    elif isinstance(config, dict):
+        spray_config = SprayConfig(**config)
+    else:
+        spray_config = config
+
+    # Read input file
+    input_format = detect_format(input_path)
+
+    if input_format == 'geojson':
+        data = read_geojson(input_path)
+    elif input_format == 'kml':
+        data = read_kml(input_path)
+    elif input_format == 'gpx':
+        data = read_gpx(input_path)
+    elif input_format == 'mpz':
+        data = read_mpz(input_path)
+    elif input_format == 'csv':
+        data = read_csv_points(input_path, **kwargs)
+    else:
+        raise ValueError(f"Unsupported input format: {input_format}")
+
+    # Read obstacles if provided
+    obstacles = None
+    if obstacles_path:
+        obs_format = detect_format(obstacles_path)
+        if obs_format == 'geojson':
+            obs_data = read_geojson(obstacles_path)
+        elif obs_format == 'kml':
+            obs_data = read_kml(obstacles_path)
+        else:
+            obs_data = read_geojson(obstacles_path)
+
+        # Extract polygon geometries from obstacles
+        obs_features = geojson_to_features(obs_data)
+        obstacles = []
+        for f in obs_features:
+            geom = f.get('geometry', {})
+            if geom.get('type') == 'Polygon':
+                obstacles.append(geom)
+
+    # Extract polygon features from input
+    features = geojson_to_features(data)
+    polygon_features = [f for f in features
+                        if f.get('geometry', {}).get('type') == 'Polygon']
+
+    if not polygon_features:
+        raise ValueError("No polygon features found in input file")
+
+    # Import multi-field optimizer
+    from .spray_optimizer import optimize_multi_field, _ensure_polygon
+
+    # Generate spray patterns for each polygon
+    output_features = []
+    include_boundaries = kwargs.get('include_boundaries', True)
+
+    # If no forced angle, use multi-field optimization to group nearby fields
+    # and determine whether to use common angles or individual angles
+    optimized_angles = None
+    if angle is None and len(polygon_features) > 1:
+        # Convert features to shapely polygons for optimization
+        polys = []
+        for feature in polygon_features:
+            geom = feature.get('geometry', {})
+            polys.append(_ensure_polygon(geom))
+
+        # Run multi-field optimization
+        optimization_results = optimize_multi_field(polys, spray_config, obstacles)
+        optimized_angles = optimization_results
+
+    for i, feature in enumerate(polygon_features):
+        geom = feature.get('geometry', {})
+        props = feature.get('properties', {}).copy()
+
+        # Determine the angle to use for this field
+        field_angle = angle  # Use forced angle if provided
+        group_info = {}
+
+        if optimized_angles is not None:
+            opt = optimized_angles[i]
+            field_angle = opt['angle']
+            group_info = {
+                'group_id': opt['group_id'],
+                'group_strategy': opt['strategy'],
+                'group_size': opt['group_size']
+            }
+
+        # Generate spray pattern with the determined angle
+        result = generate_spray_pattern_geojson(
+            geom,
+            config=spray_config,
+            obstacles=obstacles,
+            angle=field_angle,
+            include_metadata=return_metadata
+        )
+
+        # Include the original field boundary if requested (after spray generation to get metadata)
+        if include_boundaries:
+            boundary_props = {
+                **props,
+                'feature_type': 'boundary',
+                'field_index': i,
+                **group_info  # Include group info
+            }
+            # Add efficiency metadata to boundary if available
+            if return_metadata and result.get('properties'):
+                rp = result['properties']
+                boundary_props['angle'] = rp.get('angle', 0)
+                boundary_props['acres'] = rp.get('acres', 0)
+                boundary_props['acres_per_hour'] = rp.get('acres_per_hour', 0)
+                boundary_props['total_time_min'] = rp.get('total_time_min', 0)
+                boundary_props['num_tracks'] = rp.get('num_tracks', 0)
+                boundary_props['num_turns'] = rp.get('num_turns', 0)
+                boundary_props['num_hops'] = rp.get('num_hops', 0)
+
+            boundary_feature = {
+                'type': 'Feature',
+                'geometry': geom,
+                'properties': boundary_props
+            }
+            output_features.append(boundary_feature)
+
+        # Add source field info to each line feature
+        for line_feature in result.get('features', []):
+            line_props = line_feature.get('properties', {})
+            line_props['feature_type'] = 'spray_line'
+            line_props['source_field_index'] = i
+            if 'name' in props:
+                line_props['source_field_name'] = props['name']
+
+            # Add efficiency metadata to lines if requested
+            if return_metadata and result.get('properties'):
+                line_props['field_acres'] = result['properties'].get('acres', 0)
+                line_props['field_efficiency'] = result['properties'].get('acres_per_hour', 0)
+                line_props['field_angle'] = result['properties'].get('angle', 0)
+
+        output_features.extend(result.get('features', []))
+
+    # Build output GeoJSON
+    output_data = features_to_geojson(output_features)
+
+    # Write output
+    output_format = detect_format(output_path)
+
+    if output_format == 'geojson':
+        write_geojson(output_data, output_path, indent=kwargs.get('indent', 2))
+    elif output_format == 'kml':
+        write_kml(output_data, output_path, name=kwargs.get('name', 'Spray Pattern'))
+    elif output_format == 'gpx':
+        write_gpx(output_data, output_path, name=kwargs.get('name', 'Spray Pattern'))
+    else:
+        raise ValueError(f"Unsupported output format: {output_format}")
+
+    return output_path
