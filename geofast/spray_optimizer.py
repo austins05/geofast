@@ -935,14 +935,15 @@ def _optimize_single_polygon_worker(args):
 def optimize_multi_field(
     polygons: List[Union['Polygon', dict, list]],
     config: Optional[SprayConfig] = None,
-    obstacles: Optional[List] = None
+    obstacles: Optional[List] = None,
+    job_ids: Optional[List] = None
 ) -> List[Dict[str, Any]]:
     """
-    Optimize spray patterns for multiple fields, grouping nearby fields.
+    Optimize spray patterns for multiple fields, grouping by job ID.
 
-    Fields within group_distance_ft of each other are considered together.
-    For each group, determines whether to use individual optimal angles
-    (with angle change penalties) or a common angle for the whole group.
+    Fields with the same job ID are grouped together. For each job,
+    determines whether to use individual optimal angles (with angle change
+    penalties) or a common angle for all fields in the job.
 
     Uses multiprocessing for parallel optimization across CPU cores.
 
@@ -950,12 +951,13 @@ def optimize_multi_field(
         polygons: List of field boundaries
         config: Spray configuration
         obstacles: Optional list of obstacle polygons
+        job_ids: List of job IDs corresponding to each polygon (for grouping)
 
     Returns:
         List of result dicts, one per field, each containing:
         - 'angle': Selected spray angle
         - 'metrics': Efficiency metrics
-        - 'group_id': Which group this field belongs to
+        - 'group_id': Which group (job) this field belongs to
         - 'strategy': 'individual' or 'common' for the group
     """
     if config is None:
@@ -964,8 +966,19 @@ def optimize_multi_field(
     # Convert all polygons
     polys = [_ensure_polygon(p) for p in polygons]
 
-    # Group nearby polygons
-    groups = group_nearby_polygons(polys, config.group_distance_ft)
+    # Group by job ID
+    if job_ids is not None:
+        # Build groups from job IDs
+        job_to_indices = {}
+        for i, job_id in enumerate(job_ids):
+            job_key = str(job_id) if job_id is not None else f"_no_job_{i}"
+            if job_key not in job_to_indices:
+                job_to_indices[job_key] = []
+            job_to_indices[job_key].append(i)
+        groups = list(job_to_indices.values())
+    else:
+        # No job IDs - each polygon is its own group
+        groups = [[i] for i in range(len(polys))]
 
     # Determine number of workers
     max_workers = config.max_workers or os.cpu_count() or 4

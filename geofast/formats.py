@@ -1079,18 +1079,23 @@ def generate_spray_patterns(
     output_features = []
     include_boundaries = kwargs.get('include_boundaries', True)
 
-    # If no forced angle, use multi-field optimization to group nearby fields
+    # If no forced angle, use multi-field optimization to group by job ID
     # and determine whether to use common angles or individual angles
     optimized_angles = None
     if angle is None and len(polygon_features) > 1:
         # Convert features to shapely polygons for optimization
         polys = []
+        job_ids = []
         for feature in polygon_features:
             geom = feature.get('geometry', {})
             polys.append(_ensure_polygon(geom))
+            # Extract job ID for grouping (try common property names)
+            props = feature.get('properties', {})
+            job_id = props.get('jobId') or props.get('job_id') or props.get('JobId')
+            job_ids.append(job_id)
 
-        # Run multi-field optimization
-        optimization_results = optimize_multi_field(polys, spray_config, obstacles)
+        # Run multi-field optimization with job ID grouping
+        optimization_results = optimize_multi_field(polys, spray_config, obstacles, job_ids=job_ids)
         optimized_angles = optimization_results
 
     for i, feature in enumerate(polygon_features):
