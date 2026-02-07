@@ -68,13 +68,50 @@ _POWERLINES: List[LineString] = []
 _POWERLINE_INDEX: Optional[STRtree] = None
 
 
-def load_powerlines(filepath: str) -> None:
-    """Load transmission lines from GeoJSON and build spatial index."""
+def _auto_find_powerlines() -> Optional[str]:
+    """Auto-discover powerline file in current directory or common locations."""
+    search_patterns = [
+        'powerlines.geojson',
+        'transmission_lines.geojson',
+        '*powerline*.geojson',
+        '*transmission*.geojson',
+        'Electric_Transmission_Lines*.geojson',
+    ]
+    
+    import glob
+    
+    # Search current directory
+    for pattern in search_patterns:
+        matches = glob.glob(pattern)
+        if matches:
+            return matches[0]
+    
+    # Search common subdirectories
+    for subdir in ['data', 'input', '.']:
+        for pattern in search_patterns:
+            matches = glob.glob(os.path.join(subdir, pattern))
+            if matches:
+                return matches[0]
+    
+    return None
+
+
+def load_powerlines(filepath: Optional[str] = None) -> None:
+    """Load transmission lines from GeoJSON and build spatial index.
+    
+    If no filepath provided, auto-searches for powerline files in current directory.
+    """
     global _POWERLINES, _POWERLINE_INDEX
     
     import json
     
-    if not os.path.exists(filepath):
+    # Auto-find if not specified
+    if filepath is None:
+        filepath = _auto_find_powerlines()
+        if filepath:
+            print(f"Auto-discovered powerlines: {filepath}")
+    
+    if filepath is None or not os.path.exists(filepath):
         return
     
     with open(filepath) as f:
@@ -458,6 +495,13 @@ def generate_spray_pattern_geojson(
                                        if k in SprayConfig.__dataclass_fields__})
     else:
         spray_config = config
+    
+    # Auto-load powerlines if not already loaded and file exists nearby
+    if not _POWERLINES:
+        if spray_config.powerlines_path:
+            load_powerlines(spray_config.powerlines_path)
+        else:
+            load_powerlines()  # Auto-find
     
     # Convert to Shapely polygon
     polygon = _ensure_polygon(geometry)
