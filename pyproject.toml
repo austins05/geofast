@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "geofast"
-version = "0.4.0"
+version = "0.4.1"
 description = "High-performance geospatial processing with GPU acceleration, Numba JIT, and format conversion"
 readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "MIT"}
 authors = [
-    {name = "Norm", email = "norm@headingshelicopters.com"}
+    {name = "Austin", email = "austin@headingshelicopters.com"}
 ]
 keywords = [
     "geospatial",
