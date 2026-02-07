@@ -2,9 +2,8 @@
 """
 Spray Pattern Optimizer for GeoFast.
 
-Generates optimal spray lines for agricultural fields based on the
-spray-line-generator algorithm. Supports multi-field optimization
-and powerline detection.
+Generates optimal spray lines for agricultural fields.
+Supports multi-field optimization and powerline detection.
 """
 
 from dataclasses import dataclass
