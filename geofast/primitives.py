@@ -188,8 +188,10 @@ def douglas_peucker_mask(coords, epsilon):
     keep[n-1] = True
 
     # Stack for iterative processing
-    stack_start = np.empty(n, dtype=np.int32)
-    stack_end = np.empty(n, dtype=np.int32)
+    # Use 2*n to handle worst case where every point is kept (zigzag patterns)
+    stack_size = max(n * 2, 64)
+    stack_start = np.empty(stack_size, dtype=np.int32)
+    stack_end = np.empty(stack_size, dtype=np.int32)
     stack_ptr = 0
 
     stack_start[stack_ptr] = 0
@@ -285,6 +287,12 @@ def lat_lon_to_hex(lat, lon, hex_size_lat, hex_size_lon):
     Returns:
         (q, r) tuple of hex coordinates
     """
+    # Guard against division by zero
+    if hex_size_lat <= 0:
+        hex_size_lat = 0.001
+    if hex_size_lon <= 0:
+        hex_size_lon = 0.001
+
     sqrt3 = 1.7320508075688772
 
     x = lon / hex_size_lon
@@ -363,6 +371,12 @@ def line_to_hex_cells(lat1, lon1, lat2, lon2, hex_size_lat, hex_size_lon):
     Returns:
         Arrays of (q, r) coordinates
     """
+    # Guard against division by zero
+    if hex_size_lat <= 0 or hex_size_lon <= 0:
+        # Return single cell at start point with safe default size
+        q, r = lat_lon_to_hex(lat1, lon1, 0.001, 0.001)
+        return np.array([q], dtype=np.int32), np.array([r], dtype=np.int32)
+
     dlat = abs(lat2 - lat1)
     dlon = abs(lon2 - lon1)
 

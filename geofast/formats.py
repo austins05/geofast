@@ -1133,15 +1133,19 @@ def generate_spray_patterns(
                 **group_info  # Include group info
             }
             # Add efficiency metadata to boundary if available
-            if return_metadata and result.get('properties'):
+            if result.get('properties'):
                 rp = result['properties']
-                boundary_props['angle'] = rp.get('angle', 0)
-                boundary_props['acres'] = rp.get('acres', 0)
-                boundary_props['acres_per_hour'] = rp.get('acres_per_hour', 0)
-                boundary_props['total_time_min'] = rp.get('total_time_min', 0)
-                boundary_props['num_tracks'] = rp.get('num_tracks', 0)
-                boundary_props['num_turns'] = rp.get('num_turns', 0)
-                boundary_props['num_hops'] = rp.get('num_hops', 0)
+                # Always include hasPowerlines flag
+                boundary_props['hasPowerlines'] = rp.get('hasPowerlines', False)
+                
+                if return_metadata:
+                    boundary_props['angle'] = rp.get('angle', 0)
+                    boundary_props['acres'] = rp.get('acres', 0)
+                    boundary_props['acres_per_hour'] = rp.get('acres_per_hour', 0)
+                    boundary_props['total_time_min'] = rp.get('total_time_min', 0)
+                    boundary_props['num_tracks'] = rp.get('num_tracks', 0)
+                    boundary_props['num_turns'] = rp.get('num_turns', 0)
+                    boundary_props['num_hops'] = rp.get('num_hops', 0)
 
             boundary_feature = {
                 'type': 'Feature',

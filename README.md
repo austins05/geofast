@@ -233,6 +233,52 @@ Benchmarks on a system with 16 CPU cores and NVIDIA RTX 4050:
 | Point-in-polygon (batch) | ~30s | 4.7s | **6.4x** |
 | Full analysis pipeline | ~300s | 41s | **7.3x** |
 
+## Spray Pattern Generation
+
+Generate optimal spray lines for agricultural fields:
+
+```python
+from geofast import generate_spray_patterns
+
+# Generate spray lines from field boundaries
+generate_spray_patterns(
+    'fields.kml',           # Input: field polygons
+    'spray_lines.geojson',  # Output: spray lines + boundaries
+    config={
+        'swath_width_ft': 50,    # Spray width per pass
+        'hop_distance_ft': 1300  # Max gap for pilot hopping
+    }
+)
+```
+
+### Features
+
+- **Optimal direction selection**: Automatically chooses N-S or E-W based on field shape
+- **Multi-field optimization**: Groups nearby fields for consistent spray direction
+- **Powerline detection**: Flags fields with `hasPowerlines: true` when transmission lines intersect
+- **Efficiency metrics**: Calculates acres/hour, total time, line counts
+
+### Command Line
+
+```bash
+# Basic usage
+geofast spray field.kml lines.geojson
+
+# With options
+geofast spray field.kml lines.geojson --swath 60 --metadata
+
+# Ground operations (no hopping)
+geofast spray field.kml lines.geojson --no-hop
+```
+
+### Output Properties
+
+Each field boundary in the output includes:
+- `hasPowerlines`: Boolean indicating if powerlines cross the field
+- `angle`: Optimal spray direction (0=N-S, 90=E-W)
+- `acres`: Field area
+- `num_tracks`: Number of spray passes
+
 ## Project Structure
 
 ```
